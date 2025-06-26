@@ -27,20 +27,52 @@ class Coupling(ABC):
 
 
 class EmptyCoupling(Coupling):
-    """A coupling that samples empty prior sequences."""
+    """A coupling that samples empty prior sequences
+    """
     def sample(self, x1: Tensor):
         x0 = torch.empty((x1.shape[0], 0), dtype=x1.dtype, device=x1.device).long()
         return x0, x1
 
 
 class ExtendedCoupling(Coupling):
-    """A coupling that randomly inserts tokens into the target sequence."""
-    def sample(self, x1: Tensor) -> tuple[Tensor, Tensor]:
-        raise NotImplementedError
+    """A coupling that randomly inserts tokens into the target sequence
+    """
+    def __init__(self, n_insert: int = 10, vocab_size: int = 128, pad_token: int = 129):
+        self.n_insert = n_insert
+        self.vocab_size = vocab_size
+        self.pad_token = pad_token
+
+    def sample(self, x1: Tensor):
+        batch_size, x1_seq_len = x1.shape
+        x1_pad_mask = (x1 == self.pad_token)
+        x1_seq_lengths = (~x1_pad_mask).sum(dim=1).tolist()        
+
+        ins_positions = torch.stack([
+            torch.randint(0, seqlen+1, size=(self.n_insert,), dtype=torch.long, device=x1.device)
+            for seqlen in x1_seq_lengths
+        ])
+        ins_positions = torch.sort(ins_positions, dim=1)[0]   # (batch_size, n_insert)
+
+        max_new_len = self.n_insert + x1_seq_len
+        x0 = torch.full((batch_size, max_new_len), self.pad_token, dtype=x1.dtype, device=x1.device)    # (batch_size, max_new_len)
+
+        batch_indices = torch.arange(batch_size, device=x1.device).unsqueeze(1)                         # (batch_size, 1)
+        orig_positions = torch.arange(x1_seq_len, device=x1.device).unsqueeze(0).expand(batch_size, -1) # (batch_size, x1_seq_len)
+
+        num_insert_before = (ins_positions.unsqueeze(2) <= orig_positions.unsqueeze(1)).sum(dim=1)   # (batch_size, x1_seq_len)
+        new_orig_positions = orig_positions + num_insert_before # (batch_size, x1_seq_len)
+        x0[batch_indices, new_orig_positions] = x1
+        
+        ins_new_positions = ins_positions + torch.arange(self.n_insert, device=x1.device).unsqueeze(0)  # (batch_size, n_insert)
+        ins_tokens = torch.randint(0, self.vocab_size, size=(batch_size, self.n_insert), dtype=x1.dtype, device=x1.device)
+        x0[batch_indices, ins_new_positions] = ins_tokens
+
+        return x0, x1
 
 
 class UniformCoupling(Coupling):
-    """A coupling that samples uniform prior sequences within a given length range."""
+    """A coupling that samples uniform prior sequences within a given length range
+    """
     def __init__(
         self,
         min_len: int = 0,
@@ -72,7 +104,8 @@ class UniformCoupling(Coupling):
 
 
 class KappaScheduler(ABC):
-
+    """Base class for kappa schedulers
+    """
     @abstractmethod    
     def __call__(self, t: Tensor) ->  Tensor:
         raise NotImplementedError
@@ -92,3 +125,35 @@ class CubicScheduler(KappaScheduler):
 
     def derivative(self, t: Tensor) -> Tensor:
         return -6 * (t**2) + 6 * t + self.a * (3 * t**2 - 4 * t + 1) + self.b * (3 * t**2 - 2 * t)
+
+
+
+if __name__ == "__main__":
+    from utils import pretty_parse
+
+    coupling = ExtendedCoupling(n_insert=10, vocab_size=128, pad_token=129)
+    
+    # make a padded batch of sequences
+    x1 = torch.randint(0, 128, size=(4, 20), dtype=torch.long)
+    x1[0, 15:] = 129
+    x1[1, 18:] = 129
+    x1[2, 4:] = 129
+
+    x0, _ = coupling.sample(x1)
+
+    print(x1.shape)
+    print(x0.shape)
+    print()
+
+    for i in range(x0.shape[0]):
+        print(f"x0[{i}]: {pretty_parse(x0[i], compact=True)}")
+        print(f"x1[{i}]: {pretty_parse(x1[i], compact=True)}")
+        print()
+        
+    x0_pad_mask = (x0 == coupling.pad_token)    # (batch_size, x0_max_len)
+    x0_seq_lengths = (~x0_pad_mask).sum(dim=1)  # (batch_size,)
+    
+    for i in range(x0.shape[0]):
+        assert x0_pad_mask[i, :x0_seq_lengths[i]].any() == False, f"x0[{i}] has padding in the sequence part"
+        assert x0_pad_mask[i, x0_seq_lengths[i]:].all(), f"x0[{i}] is not padded correctly"
+    

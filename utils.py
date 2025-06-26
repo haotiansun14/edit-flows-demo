@@ -51,6 +51,26 @@ def naive_align_xs_to_zs(x_0: torch.Tensor, x_1: torch.Tensor):
     return x_0_padded, x_1_padded
 
 
+def shifted_align_xs_to_zs(x_0: torch.Tensor, x_1: torch.Tensor):
+    """
+    Aligns x_0 and z_1 by shifting x_1 to the right by the length of x_0, then
+    padding all sequences to the same length with gap tokens.
+    """
+    batch_size, _ = x_0.shape
+    x0_seq_lens = (~(x_0 == GAP_TOKEN)).sum(dim=1)
+    x1_seq_lens = (~(x_1 == GAP_TOKEN)).sum(dim=1)
+    z_seq_lens = x0_seq_lens + x1_seq_lens
+    max_z_len = int(z_seq_lens.max().item())
+    z_0 = torch.full((batch_size, max_z_len), GAP_TOKEN, dtype=x_0.dtype, device=x_0.device)
+    z_1 = torch.full((batch_size, max_z_len), GAP_TOKEN, dtype=x_1.dtype, device=x_1.device)
+    batch_indices = torch.arange(batch_size, device=x_0.device).unsqueeze(1)
+    z_0[batch_indices, :x0_seq_lens] = x_0
+    z_1[batch_indices, x0_seq_lens:] = x_1
+    z_0[batch_indices, z_seq_lens:] = PAD_TOKEN
+    z_1[batch_indices, z_seq_lens:] = PAD_TOKEN
+    return z_0, z_1
+
+
 def opt_align_xs_to_zs(x_0, x_1):
     aligned_pairs = [_align_pair(x_0[b], x_1[b]) for b in range(x_0.shape[0])]
     x_0_aligned = torch.stack(
