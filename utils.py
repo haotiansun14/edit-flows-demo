@@ -87,7 +87,8 @@ def rm_gap_tokens(z: torch.Tensor):
     batch_size, _ = z.shape
     z_no_gap = []
     for b in range(batch_size):
-        z_no_gap.append(z[b][z[b] != GAP_TOKEN])
+        z_no_pad = z[b][z[b] != PAD_TOKEN]
+        z_no_gap.append(z_no_pad[z_no_pad != GAP_TOKEN])
     max_len = max(len(z) for z in z_no_gap)
     x = torch.stack([F.pad(z, (0, max_len - len(z)), value=PAD_TOKEN) for z in z_no_gap], dim=0).long()
     x_pad_mask = (x == PAD_TOKEN)
