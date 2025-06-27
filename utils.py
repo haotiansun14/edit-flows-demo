@@ -7,7 +7,11 @@ PAD_TOKEN = 129
 GAP_TOKEN = 130
 
 
-def _align_pair(seq_0, seq_1):
+def _align_pair(seq_0: torch.Tensor, seq_1: torch.Tensor) -> Tuple[List[int], List[int]]:
+    """
+    Aligns two sequences using dynamic programming to find the minimum edit distance.
+    Returns two lists representing the aligned sequences.
+    """
     seq_0, seq_1 = seq_0.cpu().numpy(), seq_1.cpu().numpy()
     m, n = len(seq_0), len(seq_1)
     
@@ -41,7 +45,7 @@ def _align_pair(seq_0, seq_1):
     return aligned_0[::-1], aligned_1[::-1]
 
 
-def naive_align_xs_to_zs(x_0: torch.Tensor, x_1: torch.Tensor):
+def naive_align_xs_to_zs(x_0: torch.Tensor, x_1: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Aligns x_0 and x_1 to the same length by padding with gap_token.
     """
@@ -51,7 +55,7 @@ def naive_align_xs_to_zs(x_0: torch.Tensor, x_1: torch.Tensor):
     return x_0_padded, x_1_padded
 
 
-def shifted_align_xs_to_zs(x_0: torch.Tensor, x_1: torch.Tensor):
+def shifted_align_xs_to_zs(x_0: torch.Tensor, x_1: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Aligns x_0 and z_1 by shifting x_1 to the right by the length of x_0, then
     padding all sequences to the same length with gap tokens.
@@ -71,7 +75,11 @@ def shifted_align_xs_to_zs(x_0: torch.Tensor, x_1: torch.Tensor):
     return z_0, z_1
 
 
-def opt_align_xs_to_zs(x_0, x_1):
+def opt_align_xs_to_zs(x_0: torch.Tensor, x_1: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Aligns x_0 and x_1 to the same length by using a dynamic programming approach
+    to find the minimum edit distance alignment.
+    """
     aligned_pairs = [_align_pair(x_0[b], x_1[b]) for b in range(x_0.shape[0])]
     x_0_aligned = torch.stack(
         [torch.tensor(pair[0], dtype=x_0.dtype, device=x_0.device) for pair in aligned_pairs])
@@ -80,7 +88,7 @@ def opt_align_xs_to_zs(x_0, x_1):
     return x_0_aligned, x_1_aligned
 
 
-def rm_gap_tokens(z: torch.Tensor):
+def rm_gap_tokens(z: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Remove gap tokens from a batched tensor and right-pad with PAD_TOKEN.
     """    
@@ -98,7 +106,7 @@ def rm_gap_tokens(z: torch.Tensor):
     return x, x_pad_mask, z_gap_mask, z_pad_mask
 
 
-def rv_gap_tokens(x: torch.Tensor, z_gap_mask: torch.Tensor, z_pad_mask: torch.Tensor):
+def rv_gap_tokens(x: torch.Tensor, z_gap_mask: torch.Tensor, z_pad_mask: torch.Tensor) -> torch.Tensor:
     """
     Reinsert gap tokens into a tensor at specified positions.
     """
@@ -138,7 +146,7 @@ def pretty_parse(x: torch.Tensor, **kwargs) -> str:
     return x_str
 
 
-def pretty_print(x: torch.Tensor, **kwargs):
+def pretty_print(x: torch.Tensor, **kwargs) -> None:
     """
     Pretty print a tensor as an ascii string with gap tokens represented as '-'
     Non-printable/special characters (including line breaks, tabs, etc.) are replaced with '.'
