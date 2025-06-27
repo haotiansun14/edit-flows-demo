@@ -6,8 +6,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --time=11:00:00
 #SBATCH --job-name=my_job
-#SBATCH --output=output_%j.log
-#SBATCH --error=error_%j.log
+#SBATCH --output=logs/output_%j.log
 
 # Load any required modules
 # module load python/3.9

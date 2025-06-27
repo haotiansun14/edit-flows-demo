@@ -16,7 +16,7 @@
 # 
 # We can vary the distributions from which we sample these parameters to create a target distribution of varying modelling complexity. Further, our choice of the base distribution can also be adjusted to create more or less complex training setup. We will elaborate on this further in the training section.
 
-# In[1]:
+# In[35]:
 
 
 # Function to generate sinusoidal sequence data with optional noise
@@ -62,7 +62,7 @@ def plot_sequences(xs: np.ndarray, title: str = "Sequences", pad_token: int | No
     plt.show()
 
 
-# In[2]:
+# In[36]:
 
 
 # Visualize some examples of the generated sinusoidal sequence dataset
@@ -117,7 +117,7 @@ plot_sequences(ys, title="Sinusoidal Sequences with Noise")
 # 
 # Given a vocabulary of size $V$, the model thus outputs a vector of size $3 + 2V$ for each position in the sequence, where the first three values correspond to the marginal rates of insertion, deletion, and substitution, and the remaining $2V$ values correspond to the probabilities of inserting or substituting each token in the vocabulary. If the sequence has length $L$, the model outputs a matrix of size $L \times (3 + 2V)$.
 
-# In[3]:
+# In[55]:
 
 
 # Basic Transformer model architecture for edit flows
@@ -164,7 +164,7 @@ class SimpleEditFlowsTransformer(nn.Module):
         vocab_size: int,
         hidden_dim: int,
         num_layers: int,
-        n_heads = 8,
+        num_heads = 8,
         max_seq_len=512,
         bos_token_id=128,
         pad_token_id=129,
@@ -173,6 +173,7 @@ class SimpleEditFlowsTransformer(nn.Module):
         self.vocab_size = vocab_size
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.num_heads = num_heads
         self.max_seq_len = max_seq_len
         self.bos_token_id = bos_token_id
         self.pad_token_id = pad_token_id
@@ -188,9 +189,10 @@ class SimpleEditFlowsTransformer(nn.Module):
         )
         self.pos_embedding = nn.Embedding(max_seq_len, hidden_dim)      # Positional embeddings
         self.layers = nn.ModuleList([
-            nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=n_heads,
+            nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=num_heads,
                                         dim_feedforward=hidden_dim * 4,
-                                        dropout=0.1, activation='gelu')
+                                        dropout=0.1, activation='gelu',
+                                        batch_first=False)
             for _ in range(num_layers)
         ])
         self.final_layer_norm = nn.LayerNorm(hidden_dim)
@@ -210,6 +212,16 @@ class SimpleEditFlowsTransformer(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, vocab_size),  # Output vocab_size substitute probabilities
         )
+        self._init_weights()  # Initialize weights
+
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight, gain=0.1)
+                if module.bias is not None:
+                    torch.nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.Embedding):
+                torch.nn.init.normal_(module.weight, std=0.02)
 
     def forward(self, tokens: T["batch", "x_seq_len", "long"], 
                 time_step: T["batch", 1, "float"],
@@ -247,7 +259,7 @@ class SimpleEditFlowsTransformer(nn.Module):
         # Zero out outputs for padded positions
         mask_expanded = (~padding_mask).unsqueeze(-1).float()  # (batch_size, x_seq_len, 1)
         rates = rates * mask_expanded
-        ins_probs = ins_probs * mask_expanded  
+        ins_probs = ins_probs * mask_expanded
         sub_probs = sub_probs * mask_expanded
 
         if torch.isnan(rates).any() or torch.isnan(ins_probs).any() or torch.isnan(sub_probs).any():
@@ -260,7 +272,7 @@ class SimpleEditFlowsTransformer(nn.Module):
         )
 
 
-# In[4]:
+# In[62]:
 
 
 # Setup the model and optimizer
@@ -274,7 +286,7 @@ model = SimpleEditFlowsTransformer(
     vocab_size=V+2,  # +2 for PAD + BOS tokens
     hidden_dim=512,
     num_layers=8,
-    n_heads=32,
+    num_heads=32,
     max_seq_len=2*L,
     pad_token_id=V,
     bos_token_id=V+1,
@@ -300,7 +312,7 @@ print(f"  Learning rate: {optim.defaults['lr']}")
 # ![loss](static/editflows-loss.png)
 # _Equation 23 taken from the Edit Flows paper_
 
-# In[5]:
+# In[63]:
 
 
 # Helper functions for training the model
@@ -312,6 +324,47 @@ def sample_cond_pt(p0: torch.Tensor, p1: torch.Tensor, t: torch.Tensor, kappa: K
     t = t.reshape(-1, 1, 1)
     pt = (1 - kappa(t)) * p0 + kappa(t) * p1
     return sample_p(pt)
+
+def make_x0_like_x1(
+    x1: torch.Tensor,
+    vocab_size: int = 128,
+    pad_token: int = PAD_TOKEN,
+    noise: float = 0.05,
+    **kwargs,
+) -> torch.Tensor:
+    batch_size, x1_max_len = x1.shape
+    x0s = []
+    for i in range(batch_size):
+        x1i_len = (x1[i] != pad_token).sum().item()
+        x0i = torch.Tensor(make_sinusoidal_sequence(int(x1i_len), noise=noise, **kwargs))
+        x0i = torch.round(torch.clip(x0i * vocab_size, min=0.0, max=vocab_size-1)).long()
+        x0i = F.pad(x0i, (0, x1_max_len - x0i.shape[0]), value=pad_token)
+        x0s.append(x0i)
+    x0s = torch.stack(x0s, dim=0).long()  # (batch_size, x1_max_len)
+    assert x0s.shape == x1.shape, "x0 and x1 must have the same shape"
+    return x0s
+
+def make_x0_with_bounds(
+    batch_size: int = 2,
+    min_length: int = 96,
+    max_length: int = 96,
+    vocab_size: int = 128,
+    pad_token: int = PAD_TOKEN,
+    noise: float = 0.05,
+    **kwargs
+) -> torch.Tensor:
+    lengths = np.random.randint(min_length, max_length+1, size=(batch_size,))
+    max_seq_len = lengths.max()
+    x0s = []
+    for length in lengths:
+        x0i = torch.Tensor(make_sinusoidal_sequence(length, noise=noise, **kwargs))
+        x0i = torch.round(torch.clip(x0i * vocab_size, min=0.0, max=vocab_size-1)).long()
+        x0i = F.pad(x0i, (0, max_seq_len - x0i.shape[0]), value=pad_token)
+        x0s.append(x0i)
+    x0s = torch.stack(x0s, dim=0).long()  # (batch_size, max_seq_len)
+    assert x0s.shape[1] == max_seq_len
+    assert x0s.shape[0] == batch_size
+    return x0s
 
 def make_batch(
     batch_size: int = 2,
@@ -398,19 +451,20 @@ def make_ut_mask_from_z(
 def fill_gap_tokens_with_repeats(
     x_ut: torch.Tensor,
     z_gap_mask: torch.Tensor,
+    z_pad_mask: torch.Tensor,
 ):
     batch_size, _ = z_gap_mask.shape
     _, x_seq_len, _ = x_ut.shape
 
     # Use cumsum on non-gap positions to point to the last valid non-gap position
     non_gap_mask = ~z_gap_mask  # Invert mask to get non-gap positions
-    indices = non_gap_mask.cumsum(dim=1) - 1   # (batch_size, z_seq_len)
-    indices = indices.clamp(min=0, max=x_seq_len-1)
+    indices = non_gap_mask.cumsum(dim=1) - 1        # (batch_size, z_seq_len)
+    indices = indices.clamp(min=0, max=x_seq_len-1) # Ensure indices are within bounds
 
     # Use indices to gather from x_ut
     batch_indices = torch.arange(batch_size, device=x_ut.device).unsqueeze(1)
-    result = x_ut[batch_indices, indices]  # (batch_size, z_seq_len, vocab_size)
-
+    result = x_ut[batch_indices, indices]   # (batch_size, z_seq_len, vocab_size)
+    result[z_pad_mask] = 0                  # Set pad positions to 0
     return result
 
 
@@ -418,27 +472,37 @@ def fill_gap_tokens_with_repeats(
 
 
 # Training loop
-
+# 
 import sys
 import hashlib
 from tqdm import tqdm
 from collections import defaultdict
-from flow import CubicScheduler, EmptyCoupling, ExtendedCoupling, UniformCoupling, x2prob
+from flow import CubicScheduler, EmptyCoupling, GeneratorCoupling, ExtendedCoupling, UniformCoupling, x2prob
 from IPython.display import clear_output
 
 debug = False
 metrics = defaultdict(list)
 batch_size = 128
-min_seq_len = 128
+min_seq_len = 64
 max_seq_len = 128
+
 seq_align_fn = opt_align_xs_to_zs
 # seq_align_fn = shifted_align_xs_to_zs
-num_cycles_fn = lambda: np.random.uniform(1, 4)
+
+num_cycles_fn = lambda: np.random.uniform(2.5, 4)
+# num_cycles_fn = lambda: 3.5
 x_int_fn = lambda: np.random.uniform(0, 2*np.pi)
 
-coupling = EmptyCoupling()
-# coupling = UniformCoupling(mirror_len=True, vocab_size=V, pad_token=PAD_TOKEN)
+generator_fn = lambda x1: make_x0_with_bounds(batch_size=int(x1.shape[0]), min_length=min_seq_len, max_length=max_seq_len,
+                                              vocab_size=V, pad_token=PAD_TOKEN, num_cycles_fn=lambda: np.random.uniform(1., 2.5), x_int_fn=x_int_fn)
+# generator_fn = lambda x1: make_x0_like_x1(
+#     x1, vocab_size=V, pad_token=PAD_TOKEN, num_cycles_fn=lambda: np.random.uniform(1, 2.5), x_int_fn=x_int_fn)
+
+# coupling = EmptyCoupling()
+coupling = GeneratorCoupling(generator_fn=generator_fn)
 # coupling = ExtendedCoupling(n_insert=64, vocab_size=V, pad_token=PAD_TOKEN)
+# coupling = UniformCoupling(
+#     min_len=min_seq_len, max_len=max_seq_len, mirror_len=True, vocab_size=V, pad_token=PAD_TOKEN)
 
 scheduler = CubicScheduler(a=1.0, b=1.0)
 device = torch.device(
@@ -449,7 +513,8 @@ device = torch.device(
 model.to(device)
 model.train()
 
-pbar = tqdm(range(10000), desc="Training Edit Flows", unit="step")
+steps = 400000 // batch_size
+pbar = tqdm(range(steps), desc="Training Edit Flows", unit="step")
 
 for step in pbar:
     # samples batch of pairs, timestep, and aligns to Z space
@@ -506,9 +571,9 @@ for step in pbar:
     u_tia_sub = lambda_sub.unsqueeze(-1) * sub_probs    # (batch_size, x_seq_len, vocab_size)
     u_tia_del = lambda_del.unsqueeze(-1)                # (batch_size, x_seq_len, 1)
 
-    ux_cat = torch.cat([u_tia_ins, u_tia_sub, u_tia_del], dim=-1)   # (batch_size, x_seq_len, 2 * vocab_size + 1)
-    uz_cat = fill_gap_tokens_with_repeats(ux_cat, z_gap_mask)       # (batch_size, z_seq_len, 2 * vocab_size + 1)
-    u_tot = u_t.sum(dim=(1, 2))                                     # (batch_size,)
+    ux_cat = torch.cat([u_tia_ins, u_tia_sub, u_tia_del], dim=-1)           # (batch_size, x_seq_len, 2 * vocab_size + 1)
+    uz_cat = fill_gap_tokens_with_repeats(ux_cat, z_gap_mask, z_pad_mask)   # (batch_size, z_seq_len, 2 * vocab_size + 1)
+    u_tot = u_t.sum(dim=(1, 2))                                             # (batch_size,)
 
     if debug:
         for i in range(uz_mask.shape[1]):
@@ -532,6 +597,8 @@ for step in pbar:
     assert ux_cat[x_pad_mask].sum() == 0
     assert uz_cat[z_pad_mask].sum() == 0
     assert uz_cat[uz_cat < 0].sum() == 0
+    if debug:
+        break
 
     # Compute Bregman divergence loss
     sched_coeff = (scheduler.derivative(t) / (1 - scheduler(t))).to(device)    
@@ -568,7 +635,7 @@ for step in pbar:
         sys.stdout.flush()
 
 
-# In[ ]:
+# In[22]:
 
 
 # Visualize the training metrics
@@ -613,7 +680,8 @@ plt.legend()
 
 plt.tight_layout()
 # plt.show()
-plt.savefig("loss.png")
+plt.savefig("metrics.png", dpi=300, bbox_inches='tight')
+plt.close()
 
 
 # ## Sampling via First Order Euler Steps
@@ -624,7 +692,7 @@ plt.savefig("loss.png")
 # 
 # _Taken from Appendix B of the Edit Flows paper_
 
-# In[ ]:
+# In[23]:
 
 
 # Helper functions for sampling the model
@@ -653,7 +721,9 @@ def apply_ins_del_operations(
     eff_del_mask = del_mask & ~replace_mask
 
     # Compute new lengths after applying ins/del operations
-    new_lengths = seq_len + eff_ins_mask.sum(dim=1) - eff_del_mask.sum(dim=1)
+    xt_pad_mask = (x_t == pad_token)  # (batch_size, seq_len)
+    xt_seq_lens = (~xt_pad_mask).sum(dim=1)  # (batch_size,)
+    new_lengths = xt_seq_lens + eff_ins_mask.sum(dim=1) - eff_del_mask.sum(dim=1)
     max_new_len = int(new_lengths.max().item())
 
     if max_new_len <= 0:
@@ -701,13 +771,67 @@ def get_adaptive_h(h: float, t: torch.Tensor, scheduler: KappaScheduler):
     h_adapt = torch.minimum(_h, coeff)
     return h_adapt
 
+def load_model_state(model_name: str):
+    checkpoint = torch.load(model_name, map_location=device)
+    model = SimpleEditFlowsTransformer(
+        vocab_size=checkpoint['vocab_size'],
+        hidden_dim=checkpoint['hidden_dim'],
+        num_layers=checkpoint['num_layers'],
+        num_heads=checkpoint['num_heads'],
+        max_seq_len=checkpoint['max_seq_len'],
+        bos_token_id=checkpoint['bos_token_id'],
+        pad_token_id=checkpoint['pad_token_id'],
+    )
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optim = torch.optim.Adam(model.parameters(), lr=0.0001)
+    optim.load_state_dict(checkpoint['optimizer_state_dict'])
+    return model.to(device), optim
 
-# In[ ]:
+
+# In[33]:
+
+
+# (Optional) Save / Load the model state
+from pathlib import Path
+
+save_model = True
+load_model = False
+overwrite = True
+
+save_dir = Path(f"results/target_shift_freq_size")
+model_name = Path(f"seq2seq_prior.pt")
+
+if save_model:
+    save_path = save_dir / model_name
+    if not overwrite:
+        assert not save_path.exists(), f"Model file {save_path} already exists. Please choose a different name."
+    assert save_path.parent.exists(), f"Directory {save_path.parent} does not exist. Please create it first."
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optim.state_dict(),
+        'vocab_size': model.vocab_size,
+        'hidden_dim': model.hidden_dim,
+        'num_layers': model.num_layers,
+        'num_heads': model.num_heads,
+        'max_seq_len': model.max_seq_len,
+        'bos_token_id': model.bos_token_id,
+        'pad_token_id': model.pad_token_id,
+    }, save_path)
+    print(f"Model saved to {save_path}")
+
+if load_model:
+    save_path = save_dir / model_name
+    assert save_path.exists(), f"Model file {save_path} does not exist."
+    model, optim = load_model_state(save_path)
+    print(f"Model loaded from {save_path}")
+
+
+# In[31]:
 
 
 # Sampling loop
 
-n_steps = 100
+n_steps = 1000
 n_samples = 4
 t_min = 0.0
 
@@ -727,6 +851,7 @@ x_0, _, _, _, _, _ = make_batch(
     num_cycles_fn=num_cycles_fn,
     x_int_fn=x_int_fn,
 )
+
 x_t = x_0.clone()
 x_pad_mask = (x_t == PAD_TOKEN) # Create padding mask for x_t
 x_ts = [x_t.clone()]
@@ -785,13 +910,10 @@ with tqdm(desc="Euler Sampling") as pbar:
         pbar.update(1)
 
 
-# In[ ]:
+# In[32]:
 
 
 # Visualize the sampled sequences
-
-x0 = x_ts[0].cpu().numpy().squeeze()    # (n_samples, x_seq_len)
-x1 = x_ts[-1].cpu().numpy().squeeze()   # (n_samples, x_seq_len)
 
 n_seqs_to_plot = 5
 seq_indices = np.linspace(0, len(x_ts) - 1, n_seqs_to_plot, dtype=int)
@@ -816,10 +938,12 @@ for j in range(n_samples):
         ax[j,i].legend()
 
 plt.tight_layout()
-plt.savefig("samples.png")
+# plt.show()
+plt.savefig("model_samples.png", dpi=300, bbox_inches='tight')
+plt.close()
 
 
-# In[ ]:
+# In[34]:
 
 
 # Make video animation of the edit flows through sampling steps

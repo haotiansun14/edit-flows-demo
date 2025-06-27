@@ -8,5 +8,6 @@ __pycache__/
 *.sqlite3
 *.log
 *.mp4
+*.pt
 
 # ours

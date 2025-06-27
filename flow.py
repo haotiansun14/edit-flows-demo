@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Callable, Optional
 
 import torch
 from torch import Tensor
@@ -31,6 +32,16 @@ class EmptyCoupling(Coupling):
     """
     def sample(self, x1: Tensor):
         x0 = torch.empty((x1.shape[0], 0), dtype=x1.dtype, device=x1.device).long()
+        return x0, x1
+
+
+class GeneratorCoupling(Coupling):
+    """A coupling that samples prior sequences from a generator function
+    """
+    def __init__(self, generator_fn: Callable[[Optional[Tensor]], Tensor]):
+        self.generator_fn = generator_fn
+    def sample(self, x1: Tensor):
+        x0 = self.generator_fn(x1)
         return x0, x1
 
 
